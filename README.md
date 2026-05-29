@@ -1,66 +1,75 @@
-AirGradient Arduino Library for ESP8266 (Wemos D1 MINI) and ESP32 (ESP32-C3 Mini)
-=====================================================================================================
+# AirGradient DIY Pro V4.2 (ESP8266) — BME680 + reliability fork
 
-This is the code for the AirGradient open-source indoor and outdoor air quality monitors with ESP8266 / ESP32-C3 Microcontrollers.
+A customized fork of the official [AirGradient Arduino library](https://github.com/airgradienthq/arduino),
+targeting a **DIY Pro V4.2** PCB with a **WeMos D1 Mini / D1 Mini Pro (ESP8266)**.
+It builds on the stock `DiyProIndoorV4_2` firmware and adds:
 
-More information on the air quality monitors and kits are available here:
-Indoor Monitor: [https://www.airgradient.com/indoor/](https://www.airgradient.com/indoor/)
-Outdoor Monitor: [https://www.airgradient.com/outdoor/](https://www.airgradient.com/outdoor/)
+- 🌡️ **BME680 barometric pressure** (optional add-on) exposed on the local API.
+- 🔁 **Self-healing I²C recovery** for the SHT (temperature/humidity) and SGP41
+  (TVOC/NOx) sensors — fixes the intermittent dropout where a reading vanishes
+  until reboot.
+- 🪞 **OLED mirror fix** for the V4.2 SH1106 panel that renders backwards.
 
-This library supports the following sensor modules:
-- Plantower PMS5003
-- Plantower PMS5003T
-- SenseAir S8
-- Sensirion SGP41
-- Sensirion SHT40
+Everything else is the upstream AirGradient library, unchanged. This fork tracks
+upstream at commit `d7529cc` (post `feat/sps30-ooa`).
 
-## Important information
+## The firmware lives here
 
-Make sure you have exactly the versions of libraries and boards installed as described in the comment section of the example files.
+➡️ **[`AirGradient_DIYPro_WeMosD1MiniPro/`](AirGradient_DIYPro_WeMosD1MiniPro/)**
 
-If you have an older version of the AirGradient PCB not mentioned in the example files, please downgrade this library to version 2.4.15 to support these legacy boards.
+That folder holds the modified sketch (`.ino`, `LocalServer.*`, `OpenMetrics.*`).
+**Build & flash instructions, wiring, and full details are in its
+[`README_SETUP.md`](AirGradient_DIYPro_WeMosD1MiniPro/README_SETUP.md).**
 
-### Release Process
+## What's different from upstream
 
-Releases published on GitHub are **not immediately deployed to all devices in the market**. Each release first goes through internal testing, including limited deployments in select locations to verify stability and functionality.
+| Change | Where | Summary |
+| :--- | :--- | :--- |
+| BME680 pressure | `AirGradient_DIYPro_WeMosD1MiniPro/*.ino`, `OpenMetrics.cpp`, `LocalServer.cpp` | Optional, auto-detected; no-op if absent |
+| SHT recovery | `AirGradient_DIYPro_WeMosD1MiniPro/*.ino` (`tempHumUpdate`) | Retry → bus clear → re-init |
+| SGP41 recovery | `AirGradient_DIYPro_WeMosD1MiniPro/*.ino` (`updateTvoc`) | Bus clear → re-init after ~30 s dead |
+| OLED mirror | [`src/AgOledDisplay.cpp`](src/AgOledDisplay.cpp) (`begin()`) | `U8G2_MIRROR` for `isPro4_2()` only |
 
-If the tests pass, the firmware is then made available for:
-- **FOTA (Firmware Over-The-Air) updates** from AirGradient dashboard
-- **Manual flashing** via [Airgradient](https://www.airgradient.com/documentation/firmwares/) website
+### 1. BME680 barometric pressure (optional)
+The V4.2 PCB has no BME680 footprint, so it's a hand-wired extra on the shared I²C
+bus (auto-detected at 0x76/0x77). It uses the **SV-Zanshin "BME680"** library — the
+Adafruit driver is avoided because it pulls in a second `Adafruit_BusIO` that
+collides with the copy this library already vendors.
 
-Each GitHub release note will also include the planned rollout date for wider availability.
+**The AirGradient cloud dashboard cannot display pressure** (fixed schema), so it's
+published only on the device's local endpoints:
+- `GET /metrics` → `airgradient_pressure_hpa` (OpenMetrics / Prometheus / Grafana)
+- `GET /measures/current` → `"pressure"` field (hPa) in the JSON
 
-## Help & Support
+### 2. I²C sensor dropout recovery (SHT + SGP41)
+The stock firmware marks a failed I²C read invalid and never recovers if the shared
+bus latches up — the reading stays gone until a reboot. Both sensor paths now retry,
+then clear a wedged bus (clock SCL up to 9× to free SDA + STOP) and re-initialize.
+SGP41 uses a generous ~30 s threshold so normal startup conditioning isn't mistaken
+for a fault.
 
-If you have any questions or problems, check out [our forum](https://forum.airgradient.com/).
+### 3. OLED mirror fix (V4.2 only)
+This V4.2 SH1106 panel renders horizontally mirrored with stock `U8G2_R0`. `begin()`
+now uses `U8G2_MIRROR` for `isPro4_2()` only (ONE / DIY Pro 3.3 stay `U8G2_R0`).
+U8g2 also corrects the SH1106 column offset per orientation, which raw flip commands
+would not.
 
-## Development
+## Hardware (DIY Pro V4.2)
 
-* See [compilation instructions](/docs/howto-compile.md) for details about how to customize AirGradient's firmware and flash it to your device.
+| Sensor | Function | Bus |
+| :--- | :--- | :--- |
+| SenseAir S8 | CO₂ | Hardware Serial |
+| Plantower PMS5003 | PM2.5 | Hardware Serial |
+| Sensirion SHT3x | Temp & Humidity | I²C |
+| Sensirion SGP41 | TVOC & NOx | I²C |
+| Bosch BME680 *(optional, added)* | Pressure | I²C |
 
-## Over the air (OTA) updates
+## Credits, upstream & license
 
-* See the [OTA Updates documentation](/docs/ota-updates.md) for details about how AirGradient monitors receive over the air updates.
+This is a derivative of the **AirGradient Arduino library**
+(<https://github.com/airgradienthq/arduino>) — see their
+[compilation](docs/howto-compile.md), [local server API](docs/local-server.md),
+and [OTA](docs/ota-updates.md) docs, and the [AirGradient forum](https://forum.airgradient.com/).
 
-## API documentation
-
-* [Local server API documentation](/docs/local-server.md)
-* [AirGradient Cloud server API documentation](https://api.airgradient.com/public/docs/api/v1/).
-
-## The following libraries have been integrated into this library for ease of use
-
-- [Adafruit BusIO](https://github.com/adafruit/Adafruit_BusIO)
-- [Adafruit NeoPixel](https://github.com/adafruit/Adafruit_NeoPixel)
-- [Adafruit SH110X](https://github.com/adafruit/Adafruit_SH110X)
-- [Adafruit SSD1306 Wemos Mini OLED](https://github.com/stblassitude/Adafruit_SSD1306_Wemos_OLED)
-- [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library)
-- [Sensirion Gas Index Algorithm](https://github.com/Sensirion/arduino-gas-index-algorithm)
-- [Sensirion Core](https://github.com/Sensirion/arduino-core/)
-- [Sensirion I2C SGP41](https://github.com/Sensirion/arduino-i2c-sgp41)
-- [Sensirion I2C SHT](https://github.com/Sensirion/arduino-sht)
-- [WiFiManager](https://github.com/tzapu/WiFiManager)
-- [Arduino_JSON](https://github.com/arduino-libraries/Arduino_JSON)
-- [PubSubClient](https://github.com/knolleary/pubsubclient)
-
-## License
-CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
+Licensed under **CC BY-SA 4.0** (Attribution-ShareAlike 4.0 International), same as
+upstream. Modifications in this fork are released under the same license.

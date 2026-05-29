@@ -35,8 +35,8 @@ Board type is fixed in code: `AirGradient ag(DIY_PRO_INDOOR_V4_2)`.
 ## Local change: I2C sensor dropout recovery (SHT + SGP41)
 The stock 3.6.6 example marks a failed read as invalid and never recovers if the
 shared I2C bus latches up (SHT3x, SGP41 and OLED are all on it) — the affected
-reading then stays gone until a reboot. The `.ino` has been hardened (this copy
-only, the vendored library is untouched):
+reading then stays gone until a reboot. The `.ino` has been hardened (sketch-only,
+no library change needed):
 - **SHT** (`tempHumUpdate`): retries a transient bad read up to
   `SHT_READ_MAX_RETRY` times; after `SHT_FAILS_BEFORE_REINIT` consecutive failed
   cycles it clears a stuck bus (clocks SCL up to 9× to free SDA, issues a STOP)
@@ -75,3 +75,26 @@ SGP41 0x59, OLED 0x3C):
   - `http://<device>/measures/current` → `"pressure"` field (hPa) in the JSON
 - Temp/humidity/gas from the BME680 are also read and printed to serial each cycle,
   but not published (temp/hum would duplicate the SHT; gas unit left unpublished).
+
+## Library change: OLED mirror fix (V4.2 only)
+This particular V4.2 SH1106 OLED renders **horizontally mirrored** (text backwards)
+with the stock firmware. Unlike the changes above, the display orientation is set
+inside the AirGradient library and cannot be reached from the sketch, so this is a
+one-line library edit in `src/AgOledDisplay.cpp` (`begin()`):
+
+```cpp
+if (ag->isPro4_2()) {
+  u8g2 = new U8G2_SH1106_128X64_NONAME_F_HW_I2C(U8G2_MIRROR, U8X8_PIN_NONE);
+} else {
+  u8g2 = new U8G2_SH1106_128X64_NONAME_F_HW_I2C(U8G2_R0, U8X8_PIN_NONE);
+}
+```
+
+- Scoped to `isPro4_2()` so AirGradient ONE / DIY Pro 3.3 panels keep `U8G2_R0`.
+- `U8G2_MIRROR` is used (not raw I2C flip commands) because U8g2 also corrects the
+  SH1106's 2-pixel column offset per orientation.
+- Wrong axis after flashing? Swap for `U8G2_R2` (upside-down 180°) or
+  `U8G2_MIRROR_VERTICAL`.
+- **This repo's library copy already has the edit.** If you instead install the
+  library from a stock `.zip`, re-apply the one-liner above (or the OLED stays
+  mirrored).
