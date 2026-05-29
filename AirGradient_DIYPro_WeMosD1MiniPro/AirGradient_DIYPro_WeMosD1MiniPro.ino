@@ -106,6 +106,7 @@ static void updatePm(void);
 static void sendDataToServer(void);
 static void tempHumUpdate(void);
 static void i2cBusRecover(void);
+static void oledRotate180(void);
 static void bme680Init(void);
 static void bme680Update(void);
 static void co2Update(void);
@@ -461,9 +462,41 @@ void dispSensorNotFound(String ss) {
   delay(2000);
 }
 
+/**
+ * @brief Rotate the OLED 180 degrees, from the sketch.
+ *
+ * The DIY Pro V4.2 panel is mounted rotated relative to what the AirGradient
+ * library's U8g2 setup (U8G2_R0) assumes, so text comes out upside-down and
+ * mirrored. The library keeps its u8g2 instance private with no rotation API,
+ * so the SH1106 is flipped here directly over I2C, after the display has been
+ * initialized: reverse the segment re-map (0xA0, vs U8g2's default 0xA1) and
+ * the COM output scan direction (0xC0, vs U8g2's default 0xC8). Together these
+ * rotate the image 180 degrees. U8g2 sends these only in its init sequence (not
+ * on every redraw), so the override persists. The SH1106's column margin is
+ * symmetric (2 px on each side of 128 within 132), so flipping does not shift
+ * the image horizontally.
+ *
+ * To tune if needed: send only 0xC0 for a vertical-only flip, or only 0xA0 for
+ * a horizontal-only (left/right) mirror.
+ */
+static void oledRotate180(void) {
+  const uint8_t OLED_ADDR = 0x3C; /** SH1106 I2C address on the V4.2 board */
+  const uint8_t cmds[] = {0xA0, 0xC0};
+  for (uint8_t i = 0; i < sizeof(cmds); i++) {
+    Wire.beginTransmission(OLED_ADDR);
+    Wire.write((uint8_t)0x00); /** control byte: the next byte is a command */
+    Wire.write(cmds[i]);
+    Wire.endTransmission();
+  }
+}
+
 static void boardInit(void) {
   /** Display init */
   oledDisplay.begin();
+
+  /** Panel is mounted rotated on this board; flip it 180 so text is readable.
+   *  Done here (not in the library) so the fix lives in the sketch. */
+  oledRotate180();
 
   /** Show boot display */
   Serial.println("Firmware Version: " + ag.getVersion());

@@ -76,25 +76,17 @@ SGP41 0x59, OLED 0x3C):
 - Temp/humidity/gas from the BME680 are also read and printed to serial each cycle,
   but not published (temp/hum would duplicate the SHT; gas unit left unpublished).
 
-## Library change: OLED mirror fix (V4.2 only)
-This particular V4.2 SH1106 OLED renders **horizontally mirrored** (text backwards)
-with the stock firmware. Unlike the changes above, the display orientation is set
-inside the AirGradient library and cannot be reached from the sketch, so this is a
-one-line library edit in `src/AgOledDisplay.cpp` (`begin()`):
+## Sketch change: OLED 180° rotation (readability fix)
+This V4.2 panel is mounted rotated, so with the stock firmware the screen reads
+upside-down / mirrored. The AirGradient library keeps its U8g2 instance private
+with no rotation API, so the fix is done **in the sketch** (the library stays
+stock): `oledRotate180()` runs right after `oledDisplay.begin()` and sends the
+SH1106 a reversed segment re-map (`0xA0`) and COM scan direction (`0xC0`) over
+I2C — together a 180° flip.
 
-```cpp
-if (ag->isPro4_2()) {
-  u8g2 = new U8G2_SH1106_128X64_NONAME_F_HW_I2C(U8G2_MIRROR, U8X8_PIN_NONE);
-} else {
-  u8g2 = new U8G2_SH1106_128X64_NONAME_F_HW_I2C(U8G2_R0, U8X8_PIN_NONE);
-}
-```
-
-- Scoped to `isPro4_2()` so AirGradient ONE / DIY Pro 3.3 panels keep `U8G2_R0`.
-- `U8G2_MIRROR` is used (not raw I2C flip commands) because U8g2 also corrects the
-  SH1106's 2-pixel column offset per orientation.
-- Wrong axis after flashing? Swap for `U8G2_R2` (upside-down 180°) or
-  `U8G2_MIRROR_VERTICAL`.
-- **This repo's library copy already has the edit.** If you instead install the
-  library from a stock `.zip`, re-apply the one-liner above (or the OLED stays
-  mirrored).
+- U8g2 issues segment-remap/COM-scan only in its init sequence (not on each
+  redraw), so this override persists.
+- The SH1106's column margin is symmetric (2 px each side of 128 within 132), so
+  flipping causes no horizontal shift.
+- To tune: in `oledRotate180()` send only `{0xC0}` for a vertical-only flip, or
+  only `{0xA0}` for a horizontal-only (left/right) mirror.

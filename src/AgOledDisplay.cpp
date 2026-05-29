@@ -121,13 +121,7 @@ bool OledDisplay::begin(void) {
 
   if (ag->isOne() || ag->isPro3_3() || ag->isPro4_2()) {
     /** Create u8g2 instance */
-    if (ag->isPro4_2()) {
-      /** This DIY Pro V4.2 OLED module is wired mirrored; flip it horizontally
-       *  so text is readable. Scoped to 4.2 so ONE/3.3 panels stay U8G2_R0. */
-      u8g2 = new U8G2_SH1106_128X64_NONAME_F_HW_I2C(U8G2_MIRROR, U8X8_PIN_NONE);
-    } else {
-      u8g2 = new U8G2_SH1106_128X64_NONAME_F_HW_I2C(U8G2_R0, U8X8_PIN_NONE);
-    }
+    u8g2 = new U8G2_SH1106_128X64_NONAME_F_HW_I2C(U8G2_R0, U8X8_PIN_NONE);
     if (u8g2 == NULL) {
       logError("Create 'U8G2' failed");
       return false;

@@ -8,7 +8,7 @@ It builds on the stock `DiyProIndoorV4_2` firmware and adds:
 - 🔁 **Self-healing I²C recovery** for the SHT (temperature/humidity) and SGP41
   (TVOC/NOx) sensors — fixes the intermittent dropout where a reading vanishes
   until reboot.
-- 🪞 **OLED mirror fix** for the V4.2 SH1106 panel that renders backwards.
+- 🪞 **OLED 180° rotation** for the V4.2 panel that's mounted upside-down.
 
 Everything else is the upstream AirGradient library, unchanged. This fork tracks
 upstream at commit `d7529cc` (post `feat/sps30-ooa`).
@@ -28,7 +28,7 @@ That folder holds the modified sketch (`.ino`, `LocalServer.*`, `OpenMetrics.*`)
 | BME680 pressure | `AirGradient_DIYPro_WeMosD1MiniPro/*.ino`, `OpenMetrics.cpp`, `LocalServer.cpp` | Optional, auto-detected; no-op if absent |
 | SHT recovery | `AirGradient_DIYPro_WeMosD1MiniPro/*.ino` (`tempHumUpdate`) | Retry → bus clear → re-init |
 | SGP41 recovery | `AirGradient_DIYPro_WeMosD1MiniPro/*.ino` (`updateTvoc`) | Bus clear → re-init after ~30 s dead |
-| OLED mirror | [`src/AgOledDisplay.cpp`](src/AgOledDisplay.cpp) (`begin()`) | `U8G2_MIRROR` for `isPro4_2()` only |
+| OLED rotation | [`AirGradient_DIYPro_WeMosD1MiniPro/`](AirGradient_DIYPro_WeMosD1MiniPro/) (`oledRotate180`) | 180° flip via raw SH1106 I²C commands, from the sketch |
 
 ### 1. BME680 barometric pressure (optional)
 The V4.2 PCB has no BME680 footprint, so it's a hand-wired extra on the shared I²C
@@ -48,11 +48,12 @@ then clear a wedged bus (clock SCL up to 9× to free SDA + STOP) and re-initiali
 SGP41 uses a generous ~30 s threshold so normal startup conditioning isn't mistaken
 for a fault.
 
-### 3. OLED mirror fix (V4.2 only)
-This V4.2 SH1106 panel renders horizontally mirrored with stock `U8G2_R0`. `begin()`
-now uses `U8G2_MIRROR` for `isPro4_2()` only (ONE / DIY Pro 3.3 stay `U8G2_R0`).
-U8g2 also corrects the SH1106 column offset per orientation, which raw flip commands
-would not.
+### 3. OLED 180° rotation (V4.2)
+This V4.2 panel is mounted rotated, so it reads upside-down / mirrored with the stock
+library. The library's U8g2 instance is private with no rotation API, so the sketch's
+`oledRotate180()` flips it 180° right after `begin()` by sending the SH1106 a reversed
+segment re-map (`0xA0`) and COM scan direction (`0xC0`) over I²C — the AirGradient
+library itself is left **stock**.
 
 ## Hardware (DIY Pro V4.2)
 
