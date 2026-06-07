@@ -95,12 +95,16 @@ bool Sht::begin(TwoWire &wire) {
   /** Initialize sensor */
   if (shtSensor()->init(wire) == false) {
     AgLog("Initialize SHTSensor failed");
+    delete shtSensor();
+    _sensor = nullptr;
     return false;
   }
 
   // Only supported by SHT3x
   if (shtSensor()->setAccuracy(SHTSensor::SHT_ACCURACY_MEDIUM) == false) {
     AgLog("Configure sensor failed");
+    delete shtSensor();
+    _sensor = nullptr;
     return false;
   }
 
@@ -118,6 +122,7 @@ void Sht::end(void) {
     return;
   }
   delete shtSensor();
+  _sensor = nullptr;
   _isBegin = false;
 #if defined(ESP8266)
   _debugStream = nullptr;

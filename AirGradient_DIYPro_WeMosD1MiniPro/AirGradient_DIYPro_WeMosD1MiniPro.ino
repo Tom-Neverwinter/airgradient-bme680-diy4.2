@@ -54,6 +54,12 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #define SHT_FAILS_BEFORE_REINIT 3     /** consecutive failed cycles -> recover bus */
 #define SGP_FAILS_BEFORE_REINIT 30    /** ~30s of dead TVOC/NOx -> recover bus */
 #define SENSOR_BME680_UPDATE_INTERVAL 10000           /** ms */
+#define DIAGNOSTIC_TRACE 1
+#define DIAGNOSTIC_BUILD_LABEL "DIAG-I2C-READY-SPLIT-20260607-0535"
+#define DIAG_FAST_TRACE_INTERVAL_MS 10000
+#define DIAG_HEARTBEAT_INTERVAL_MS 30000
+#define MISSING_I2C_SENSOR_RETRY_INTERVAL 60000
+#define I2C_RECOVER_SETTLE_MS 50
 
 static AirGradient ag(DIY_PRO_INDOOR_V4_2);
 static Configuration configuration(Serial);
@@ -77,6 +83,9 @@ static AgFirmwareMode fwMode = FW_MODE_I_42PS;
 static uint8_t shtFailCount = 0;
 /** Consecutive invalid SGP41 cycles, used to trigger bus/sensor recovery */
 static uint8_t sgpFailCount = 0;
+/** Driver state for built-in I2C sensors. The hardware is expected on this board. */
+static bool shtReady = false;
+static bool sgpReady = false;
 
 /**
  * Optional BME680 add-on. Not part of the stock DIY Pro V4.2 hardware and not
@@ -97,7 +106,6 @@ float bme680GasResistance = NAN;   /** kOhm */
 static String fwNewVersion;
 
 static void boardInit(void);
-static void failedHandler(String msg);
 static void configurationUpdateSchedule(void);
 static void appDispHandler(void);
 static void oledDisplaySchedule(void);
@@ -110,6 +118,8 @@ static void oledRotate180(void);
 static void bme680Init(void);
 static void bme680Update(void);
 static void co2Update(void);
+static void missingI2cSensorRetry(void);
+static bool shtInit(void);
 static void mdnsInit(void);
 static void initMqtt(void);
 static void factoryConfigReset(void);
@@ -119,6 +129,11 @@ static void wifiFactoryConfigure(void);
 static void mqttHandle(void);
 static int calculateMaxPeriod(int updateInterval);
 static void setMeasurementMaxPeriod();
+static uint32_t diagBegin(const char *section);
+static void diagEnd(const char *section, uint32_t startedMs);
+static bool diagDue(uint32_t &lastMs, uint32_t intervalMs);
+static void diagHeartbeat(void);
+static void diagI2cScan(const char *label);
 
 AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, oledDisplaySchedule);
 AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
@@ -131,11 +146,93 @@ AgSchedule tvocSchedule(SENSOR_TVOC_UPDATE_INTERVAL, updateTvoc);
 AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
 AgSchedule mqttSchedule(MQTT_SYNC_INTERVAL, mqttHandle);
 AgSchedule bme680Schedule(SENSOR_BME680_UPDATE_INTERVAL, bme680Update);
+AgSchedule missingI2cSensorSchedule(MISSING_I2C_SENSOR_RETRY_INTERVAL,
+                                    missingI2cSensorRetry);
+
+static uint32_t diagWifiTraceMs = 0;
+static uint32_t diagLocalServerTraceMs = 0;
+static uint32_t diagSgpHandleTraceMs = 0;
+static uint32_t diagMdnsTraceMs = 0;
+static uint32_t diagMqttLoopTraceMs = 0;
+static uint32_t diagPmsHandleTraceMs = 0;
+static uint32_t diagHeartbeatMs = 0;
+
+static uint32_t diagBegin(const char *section) {
+#if DIAGNOSTIC_TRACE
+  uint32_t startedMs = millis();
+  Serial.printf("[DIAG] %lu BEGIN %s heap=%u\r\n",
+                (unsigned long)startedMs, section, ESP.getFreeHeap());
+  Serial.flush();
+  return startedMs;
+#else
+  return millis();
+#endif
+}
+
+static void diagEnd(const char *section, uint32_t startedMs) {
+#if DIAGNOSTIC_TRACE
+  uint32_t nowMs = millis();
+  Serial.printf("[DIAG] %lu END %s +%lu heap=%u\r\n",
+                (unsigned long)nowMs, section,
+                (unsigned long)(nowMs - startedMs), ESP.getFreeHeap());
+  Serial.flush();
+#endif
+}
+
+static bool diagDue(uint32_t &lastMs, uint32_t intervalMs) {
+#if DIAGNOSTIC_TRACE
+  uint32_t nowMs = millis();
+  if ((uint32_t)(nowMs - lastMs) >= intervalMs) {
+    lastMs = nowMs;
+    return true;
+  }
+#endif
+  return false;
+}
+
+static void diagHeartbeat(void) {
+#if DIAGNOSTIC_TRACE
+  if (diagDue(diagHeartbeatMs, DIAG_HEARTBEAT_INTERVAL_MS)) {
+    Serial.printf("[DIAG] %lu HEARTBEAT heap=%u wifi=%d bme=%d shtReady=%d sgpReady=%d\r\n",
+                  (unsigned long)millis(), ESP.getFreeHeap(),
+                  wifiConnector.RSSI(), bme680Found,
+                  shtReady, sgpReady);
+    Serial.flush();
+  }
+#endif
+}
+
+static void diagI2cScan(const char *label) {
+#if DIAGNOSTIC_TRACE
+  Serial.printf("[DIAG] I2C scan %s:", label);
+  int found = 0;
+  for (uint8_t address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    uint8_t error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.printf(" 0x%02X", address);
+      found++;
+    } else if (error == 4) {
+      Serial.printf(" 0x%02X(err)", address);
+    }
+    yield();
+  }
+  Serial.printf(" found=%d\r\n", found);
+  Serial.flush();
+#endif
+}
 
 void setup() {
   /** Serial for print debug message */
   Serial.begin(115200);
   delay(100); /** For bester show log */
+
+#if DIAGNOSTIC_TRACE
+  Serial.println();
+  Serial.println(F("[DIAG] BUILD " DIAGNOSTIC_BUILD_LABEL));
+  Serial.println(F("[DIAG] SKETCH AirGradient_DIYPro_WeMosD1MiniPro.ino"));
+  Serial.flush();
+#endif
 
   /** Print device ID into log */
   Serial.println("Serial nr: " + ag.deviceId());
@@ -249,6 +346,8 @@ void setup() {
 }
 
 void loop() {
+  diagHeartbeat();
+
   /** Handle schedule */
   dispLedSchedule.run();
   configSchedule.run();
@@ -259,19 +358,32 @@ void loop() {
   }
   if (configuration.hasSensorPMS1) {
     pmsSchedule.run();
-    ag.pms5003.handle();
+    if (diagDue(diagPmsHandleTraceMs, DIAG_FAST_TRACE_INTERVAL_MS)) {
+      uint32_t diagMs = diagBegin("loop:pms5003.handle");
+      ag.pms5003.handle();
+      diagEnd("loop:pms5003.handle", diagMs);
+    } else {
+      ag.pms5003.handle();
+    }
   }
-  if (configuration.hasSensorSHT) {
+  if (shtReady) {
     tempHumSchedule.run();
   }
-  if (configuration.hasSensorSGP) {
+  if (sgpReady) {
     tvocSchedule.run();
   }
+  missingI2cSensorSchedule.run();
 
   watchdogFeedSchedule.run();
 
   /** Check for handle WiFi reconnect */
-  wifiConnector.handle();
+  if (diagDue(diagWifiTraceMs, DIAG_FAST_TRACE_INTERVAL_MS)) {
+    uint32_t diagMs = diagBegin("loop:wifi.handle");
+    wifiConnector.handle();
+    diagEnd("loop:wifi.handle", diagMs);
+  } else {
+    wifiConnector.handle();
+  }
 
   /** factory reset handle */
   factoryConfigReset();
@@ -279,16 +391,40 @@ void loop() {
   /** check that local configura changed then do some action */
   configUpdateHandle();
 
-  localServer._handle();
-
-  if (configuration.hasSensorSGP) {
-    ag.sgp41.handle();
+  if (diagDue(diagLocalServerTraceMs, DIAG_FAST_TRACE_INTERVAL_MS)) {
+    uint32_t diagMs = diagBegin("loop:localServer.handle");
+    localServer._handle();
+    diagEnd("loop:localServer.handle", diagMs);
+  } else {
+    localServer._handle();
   }
 
-  MDNS.update();
+  if (sgpReady) {
+    if (diagDue(diagSgpHandleTraceMs, DIAG_FAST_TRACE_INTERVAL_MS)) {
+      uint32_t diagMs = diagBegin("loop:sgp41.handle");
+      ag.sgp41.handle();
+      diagEnd("loop:sgp41.handle", diagMs);
+    } else {
+      ag.sgp41.handle();
+    }
+  }
+
+  if (diagDue(diagMdnsTraceMs, DIAG_FAST_TRACE_INTERVAL_MS)) {
+    uint32_t diagMs = diagBegin("loop:mdns.update");
+    MDNS.update();
+    diagEnd("loop:mdns.update", diagMs);
+  } else {
+    MDNS.update();
+  }
 
   mqttSchedule.run();
-  mqttClient.handle();
+  if (diagDue(diagMqttLoopTraceMs, DIAG_FAST_TRACE_INTERVAL_MS)) {
+    uint32_t diagMs = diagBegin("loop:mqtt.loop");
+    mqttClient.handle();
+    diagEnd("loop:mqtt.loop", diagMs);
+  } else {
+    mqttClient.handle();
+  }
 
   if (bme680Found) {
     bme680Schedule.run();
@@ -301,7 +437,9 @@ static void co2Update(void) {
     return;
   }
 
+  uint32_t diagMs = diagBegin("sensor:s8.getCo2");
   int value = ag.s8.getCo2();
+  diagEnd("sensor:s8.getCo2", diagMs);
   if (utils::isValidCO2(value)) {
     measurements.update(Measurements::CO2, value);
   } else {
@@ -407,11 +545,28 @@ static bool sgp41Init(void) {
   if (ag.sgp41.begin(Wire)) {
     Serial.println("Init SGP41 success");
     configuration.hasSensorSGP = true;
+    sgpReady = true;
     return true;
   } else {
     Serial.println("Init SGP41 failure");
-    configuration.hasSensorSGP = false;
+    configuration.hasSensorSGP = true;
+    sgpReady = false;
   }
+  return false;
+}
+
+static bool shtInit(void) {
+  if (ag.sht.begin(Wire)) {
+    Serial.println("Init SHT success");
+    configuration.hasSensorSHT = true;
+    shtReady = true;
+    shtFailCount = 0;
+    return true;
+  }
+
+  Serial.println("SHTx sensor not found");
+  configuration.hasSensorSHT = true;
+  shtReady = false;
   return false;
 }
 
@@ -429,10 +584,13 @@ static void wifiFactoryConfigure(void) {
 
 static void mqttHandle(void) {
   if(mqttClient.isConnected() == false) {
+    uint32_t diagMs = diagBegin("mqtt:connect");
     mqttClient.connect(String("airgradient-") + ag.deviceId());
+    diagEnd("mqtt:connect", diagMs);
   }
 
   if (mqttClient.isConnected()) {
+    uint32_t diagMs = diagBegin("mqtt:publish");
     String payload = measurements.toString(true, fwMode, wifiConnector.RSSI());
     String topic = "airgradient/readings/" + ag.deviceId();
     if (mqttClient.publish(topic.c_str(), payload.c_str(), payload.length())) {
@@ -440,6 +598,7 @@ static void mqttHandle(void) {
     } else {
       Serial.println("MQTT sync failure");
     }
+    diagEnd("mqtt:publish", diagMs);
   }
 }
 
@@ -527,16 +686,29 @@ static void boardInit(void) {
   /** Show message init sensor */
   oledDisplay.setText("Sensor", "initializing...", "");
 
+  configuration.hasSensorSHT = true;
+  configuration.hasSensorSGP = true;
+
+  diagI2cScan("boot:beforeSensorInit");
+
   /** Init sensor SGP41 */
   if (sgp41Init() == false) {
-    dispSensorNotFound("SGP41");
+    i2cBusRecover();
+    delay(I2C_RECOVER_SETTLE_MS);
+    diagI2cScan("boot:afterSgpRecover");
+    if (sgp41Init() == false) {
+      dispSensorNotFound("SGP41");
+    }
   }
 
   /** Init SHT */
-  if (ag.sht.begin(Wire) == false) {
-    Serial.println("SHTx sensor not found");
-    configuration.hasSensorSHT = false;
-    dispSensorNotFound("SHT");
+  if (shtInit() == false) {
+    i2cBusRecover();
+    delay(I2C_RECOVER_SETTLE_MS);
+    diagI2cScan("boot:afterShtRecover");
+    if (shtInit() == false) {
+      dispSensorNotFound("SHT");
+    }
   }
 
   /** Init S8 CO2 sensor */
@@ -572,13 +744,6 @@ static void boardInit(void) {
   localServer.setFwMode(FW_MODE_I_42PS);
 }
 
-static void failedHandler(String msg) {
-  while (true) {
-    Serial.println(msg);
-    delay(1000);
-  }
-}
-
 static void configurationUpdateSchedule(void) {
   if (configuration.isOfflineMode() ||
       configuration.getConfigurationControl() == ConfigurationControl::ConfigurationControlLocal) {
@@ -588,7 +753,11 @@ static void configurationUpdateSchedule(void) {
     return;
   }
 
-  if (apiClient.fetchServerConfiguration()) {
+  uint32_t diagMs = diagBegin("cloud:fetchConfig");
+  bool fetched = apiClient.fetchServerConfiguration();
+  diagEnd("cloud:fetchConfig", diagMs);
+
+  if (fetched) {
     configUpdateHandle();
   }
 }
@@ -597,6 +766,8 @@ static void configUpdateHandle() {
   if (configuration.isUpdated() == false) {
     return;
   }
+
+  uint32_t diagMs = diagBegin("config:updateHandle");
 
   stateMachine.executeCo2Calibration();
 
@@ -610,6 +781,7 @@ static void configUpdateHandle() {
     if (configuration.noxLearnOffsetChanged() ||
         configuration.tvocLearnOffsetChanged()) {
       ag.sgp41.end();
+      sgpReady = false;
 
       int oldTvocOffset = ag.sgp41.getTvocLearningOffset();
       int oldNoxOffset = ag.sgp41.getNoxLearningOffset();
@@ -636,6 +808,7 @@ static void configUpdateHandle() {
   }
 
   appDispHandler();
+  diagEnd("config:updateHandle", diagMs);
 }
 
 static void appDispHandler(void) {
@@ -661,15 +834,18 @@ static void appDispHandler(void) {
 
 static void oledDisplaySchedule(void) {
   if (factoryBtnPressTime == 0) {
+    uint32_t diagMs = diagBegin("display:update");
     appDispHandler();
+    diagEnd("display:update", diagMs);
   }
 }
 
 static void updateTvoc(void) {
-  if (!configuration.hasSensorSGP) {
+  if (!sgpReady) {
     return;
   }
 
+  uint32_t diagMs = diagBegin("sensor:sgp41.read");
   int tvoc = ag.sgp41.getTvocIndex();
   int nox = ag.sgp41.getNoxIndex();
 
@@ -677,6 +853,7 @@ static void updateTvoc(void) {
   measurements.update(Measurements::TVOCRaw, ag.sgp41.getTvocRaw());
   measurements.update(Measurements::NOx, nox);
   measurements.update(Measurements::NOxRaw, ag.sgp41.getNoxRaw());
+  diagEnd("sensor:sgp41.read", diagMs);
 
   /** The SGP41 driver already invalidates its own readings after repeated I2C
    *  failures, but never re-inits, so a wedged bus kills TVOC/NOx until reboot.
@@ -693,18 +870,22 @@ static void updateTvoc(void) {
 
   if (sgpFailCount >= SGP_FAILS_BEFORE_REINIT) {
     Serial.println("Recovering SGP41: clearing I2C bus and re-initializing");
+    diagMs = diagBegin("recover:sgp41");
     i2cBusRecover();
     ag.sgp41.end();
-    if (ag.sgp41.begin(Wire)) {
+    sgpReady = false;
+    if (sgp41Init()) {
       Serial.println("SGP41 re-init successful (gas index learning reset)");
     } else {
       Serial.println("SGP41 re-init failed, will retry");
     }
     sgpFailCount = 0; /** fresh window so re-conditioning isn't counted */
+    diagEnd("recover:sgp41", diagMs);
   }
 }
 
 static void updatePm(void) {
+  uint32_t diagMs = diagBegin("sensor:pms.values");
   if (ag.pms5003.connected()) {
     measurements.update(Measurements::PM01, ag.pms5003.getPm01Ae());
     measurements.update(Measurements::PM25, ag.pms5003.getPm25Ae());
@@ -716,6 +897,7 @@ static void updatePm(void) {
     measurements.update(Measurements::PM10, utils::getInvalidPmValue());
     measurements.update(Measurements::PM03_PC, utils::getInvalidPmValue());
   }
+  diagEnd("sensor:pms.values", diagMs);
 }
 
 static void sendDataToServer(void) {
@@ -734,8 +916,15 @@ static void sendDataToServer(void) {
     return;
   }
 
+  uint32_t diagMs = diagBegin("payload:build");
   String syncData = measurements.toString(false, fwMode, wifiConnector.RSSI());
-  if (apiClient.postToServer(syncData)) {
+  diagEnd("payload:build", diagMs);
+
+  diagMs = diagBegin("cloud:postMeasures");
+  bool posted = apiClient.postToServer(syncData);
+  diagEnd("cloud:postMeasures", diagMs);
+
+  if (posted) {
     Serial.println();
     Serial.println("Online mode and isPostToAirGradient = true");
     Serial.println();
@@ -815,7 +1004,9 @@ static void bme680Update(void) {
   /** Zanshin returns fixed-point integers: temp in 1/100 degC, humidity in
    *  1/1000 %, pressure in Pa, gas in milliohms. */
   int32_t temp, hum, press, gas;
+  uint32_t diagMs = diagBegin("sensor:bme680.getSensorData");
   bme680.getSensorData(temp, hum, press, gas);
+  diagEnd("sensor:bme680.getSensorData", diagMs);
 
   bme680Pressure = press / 100.0f;        /** Pa -> hPa */
   bme680Temperature = temp / 100.0f;      /** 1/100 degC -> degC */
@@ -827,9 +1018,45 @@ static void bme680Update(void) {
                 bme680GasResistance);
 }
 
+static void missingI2cSensorRetry(void) {
+  if (shtReady && sgpReady) {
+    return;
+  }
+
+  uint32_t diagMs = diagBegin("recover:missingI2cSensors");
+  diagI2cScan("retry:beforeRecover");
+  i2cBusRecover();
+  delay(I2C_RECOVER_SETTLE_MS);
+  diagI2cScan("retry:afterRecover");
+
+  if (!sgpReady) {
+    Serial.println("Retrying missing SGP41");
+    if (sgp41Init()) {
+      Serial.println("SGP41 retry successful");
+    } else {
+      Serial.println("SGP41 retry failed");
+      i2cBusRecover();
+      delay(I2C_RECOVER_SETTLE_MS);
+      diagI2cScan("retry:afterSgpFailureRecover");
+    }
+  }
+
+  if (!shtReady) {
+    Serial.println("Retrying missing SHT");
+    if (shtInit()) {
+      Serial.println("SHT retry successful");
+    } else {
+      Serial.println("SHT retry failed");
+    }
+  }
+
+  diagEnd("recover:missingI2cSensors", diagMs);
+}
+
 static void tempHumUpdate(void) {
   /** Retry a transient bad read (CRC error / bus contention) before failing */
   bool ok = false;
+  uint32_t diagMs = diagBegin("sensor:sht.measure");
   for (int attempt = 0; attempt <= SHT_READ_MAX_RETRY; attempt++) {
     if (ag.sht.measure()) {
       ok = true;
@@ -837,6 +1064,7 @@ static void tempHumUpdate(void) {
     }
     delay(20);
   }
+  diagEnd("sensor:sht.measure", diagMs);
 
   if (ok) {
     shtFailCount = 0;
@@ -848,7 +1076,7 @@ static void tempHumUpdate(void) {
     measurements.update(Measurements::Humidity, rhum);
 
     // Update compensation temperature and humidity for SGP41
-    if (configuration.hasSensorSGP) {
+    if (sgpReady) {
       ag.sgp41.setCompensationTemperatureHumidity(temp, rhum);
     }
     return;
@@ -866,14 +1094,17 @@ static void tempHumUpdate(void) {
    *  re-initialize the sensor so temperature recovers without a reboot. */
   if (shtFailCount >= SHT_FAILS_BEFORE_REINIT) {
     Serial.println("Recovering SHT: clearing I2C bus and re-initializing");
+    diagMs = diagBegin("recover:sht");
     i2cBusRecover();
     ag.sht.end();
-    if (ag.sht.begin(Wire)) {
+    shtReady = false;
+    if (shtInit()) {
       Serial.println("SHT re-init successful");
       shtFailCount = 0;
     } else {
       Serial.println("SHT re-init failed, will retry next cycle");
     }
+    diagEnd("recover:sht", diagMs);
   }
 }
 

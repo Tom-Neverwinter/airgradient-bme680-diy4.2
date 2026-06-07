@@ -41,6 +41,8 @@ bool AgApiClient::fetchServerConfiguration(void) {
 #ifdef ESP8266
   HTTPClient client;
   WiFiClient wifiClient;
+  wifiClient.setTimeout(timeoutMs);
+  client.setTimeout(timeoutMs);
   if (client.begin(wifiClient, uri) == false) {
     getConfigFailed = true;
     return false;
@@ -108,6 +110,8 @@ bool AgApiClient::postToServer(String data) {
 #ifdef ESP8266
   HTTPClient client;
   WiFiClient wifiClient;
+  wifiClient.setTimeout(timeoutMs);
+  client.setTimeout(timeoutMs);
   if (client.begin(wifiClient, uri) == false) {
     getConfigFailed = true;
     return false;

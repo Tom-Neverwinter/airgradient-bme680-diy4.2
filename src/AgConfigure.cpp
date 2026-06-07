@@ -1104,7 +1104,9 @@ bool Configuration::parse(String data, bool isLocal) {
     updated = true;
     saveConfig();
     printConfig();
-    _callback();
+    if (_callback != nullptr) {
+      _callback();
+    }
   }
 
   return true;

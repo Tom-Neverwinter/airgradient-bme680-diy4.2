@@ -6,6 +6,7 @@ static void __mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                  int32_t event_id, void *event_data);
 #else
 #define CLIENT() ((PubSubClient *)client)
+#define MQTT_SOCKET_TIMEOUT_SECONDS 5
 #endif
 
 MqttClient::MqttClient(Stream &debugLog) : PrintLog(debugLog, "MqttClient") {
@@ -55,94 +56,54 @@ bool MqttClient::begin(String uri) {
     return false;
   }
 #else
-  // mqtt://<Username>:<Password>@<Host>:<Port>
-  bool hasUser = false;
-  for (unsigned int i = 0; i < this->uri.length(); i++) {
-    if (this->uri[i] == '@') {
-      hasUser = true;
-      break;
-    }
-  }
-
   user = "";
   password = "";
   server = "";
   port = 0;
 
-  char *serverPort = NULL;
-  char *buf = (char *)this->uri.c_str();
-  if (hasUser) {
-    // mqtt://<Username>:<Password>@<Host>:<Port>
-    char *userPass = strtok(buf, "@");
-    serverPort = strtok(NULL, "@");
-
-    if (userPass == NULL) {
-      logError("User and Password invalid");
-      return false;
-    } else {
-      if ((userPass[5] == '/') && (userPass[6] == '/')) { /** Check mqtt:// */
-        userPass = &userPass[7];
-      } else if ((userPass[6] == '/') &&
-                 (userPass[7] == '/')) { /** Check mqtts:// */
-        userPass = &userPass[8];
-      } else {
-        logError("Server invalid");
-        return false;
-      }
-
-      buf = strtok(userPass, ":");
-      if (buf == NULL) {
-        logError("User invalid");
-        return false;
-      }
-      user = String(buf);
-
-      buf = strtok(NULL, "@");
-      if (buf == NULL) {
-        logError("Password invalid");
-        return false;
-      }
-      password = String(buf);
-
-      logInfo("Username: " + user);
-      logInfo("Password: " + password);
-    }
-
-    if (serverPort == NULL) {
-      logError("Server and port invalid");
-      return false;
-    }
+  String uriBody;
+  if (this->uri.startsWith("mqtt://")) {
+    uriBody = this->uri.substring(7);
+  } else if (this->uri.startsWith("mqtts://")) {
+    uriBody = this->uri.substring(8);
   } else {
-    // mqtt://<Host>:<Port>
-    if ((buf[5] == '/') && (buf[6] == '/')) { /** Check mqtt:// */
-      serverPort = &buf[7];
-    } else if ((buf[6] == '/') && (buf[7] == '/')) { /** Check mqtts:// */
-      serverPort = &buf[8];
-    } else {
-      logError("Server invalid");
-      return false;
-    }
+    logError("Server invalid");
+    return false;
   }
 
-  if (serverPort == NULL) {
+  int atIndex = uriBody.indexOf('@');
+  String serverPort = uriBody;
+  if (atIndex >= 0) {
+    String userPass = uriBody.substring(0, atIndex);
+    serverPort = uriBody.substring(atIndex + 1);
+
+    int separator = userPass.indexOf(':');
+    if (separator <= 0 || separator == (int)userPass.length() - 1) {
+      logError("User and Password invalid");
+      return false;
+    }
+
+    user = userPass.substring(0, separator);
+    password = userPass.substring(separator + 1);
+
+    logInfo("Username: " + user);
+    logInfo("Password: " + password);
+  }
+
+  int portSeparator = serverPort.lastIndexOf(':');
+  if (portSeparator <= 0 || portSeparator == (int)serverPort.length() - 1) {
     logError("Server and port invalid");
     return false;
   }
 
-  buf = strtok(serverPort, ":");
-  if (buf == NULL) {
-    logError("Server invalid");
-    return false;
-  }
-  server = String(buf);
+  server = serverPort.substring(0, portSeparator);
   logInfo("Server: " + server);
 
-  buf = strtok(NULL, ":");
-  if (buf == NULL) {
+  port = (uint16_t)serverPort.substring(portSeparator + 1).toInt();
+  if (port == 0) {
     logError("Port invalid");
     return false;
   }
-  port = (uint16_t)String(buf).toInt();
   logInfo("Port: " + String(port));
 
   if (client == NULL) {
@@ -154,6 +115,7 @@ bool MqttClient::begin(String uri) {
 
   CLIENT()->setServer(server.c_str(), port);
   CLIENT()->setBufferSize(1024);
+  CLIENT()->setSocketTimeout(MQTT_SOCKET_TIMEOUT_SECONDS);
   connected = false;
 #endif
 

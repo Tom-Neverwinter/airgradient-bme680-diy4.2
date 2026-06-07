@@ -59,10 +59,22 @@ bool Sgp41::begin(TwoWire &wire) {
 
   uint16_t testResult;
   if (sgpSensor()->executeSelfTest(testResult) != 0) {
+    delete sgpSensor();
+    delete vocAlgorithm();
+    delete noxAlgorithm();
+    this->_sensor = nullptr;
+    this->_vocAlgorithm = nullptr;
+    this->_noxAlgorithm = nullptr;
     return false;
   }
   if (testResult != 0xD400) {
     AgLog("Self-test failed");
+    delete sgpSensor();
+    delete vocAlgorithm();
+    delete noxAlgorithm();
+    this->_sensor = nullptr;
+    this->_vocAlgorithm = nullptr;
+    this->_noxAlgorithm = nullptr;
     return false;
   }
 
@@ -216,6 +228,9 @@ void Sgp41::end(void) {
   delete sgpSensor();
   delete vocAlgorithm();
   delete noxAlgorithm();
+  this->_sensor = nullptr;
+  this->_vocAlgorithm = nullptr;
+  this->_noxAlgorithm = nullptr;
 
   AgLog("De-initialize");
 }

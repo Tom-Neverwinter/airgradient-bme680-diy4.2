@@ -32,11 +32,11 @@ Board type is fixed in code: `AirGradient ag(DIY_PRO_INDOOR_V4_2)`.
 - Connect USB, select Port, Upload.
 - First boot with no WiFi ⇒ hotspot **`airgradient`**; connect, enter WiFi + optional dashboard token.
 
-## Local change: I2C sensor dropout recovery (SHT + SGP41)
+## Local change: I2C diagnostics and sensor recovery (SHT + SGP41)
 The stock 3.6.6 example marks a failed read as invalid and never recovers if the
 shared I2C bus latches up (SHT3x, SGP41 and OLED are all on it) — the affected
-reading then stays gone until a reboot. The `.ino` has been hardened (sketch-only,
-no library change needed):
+reading then stays gone until a reboot. The `.ino` has been hardened, with small
+library cleanup changes for safe retry loops:
 - **SHT** (`tempHumUpdate`): retries a transient bad read up to
   `SHT_READ_MAX_RETRY` times; after `SHT_FAILS_BEFORE_REINIT` consecutive failed
   cycles it clears a stuck bus (clocks SCL up to 9× to free SDA, issues a STOP)
@@ -50,6 +50,40 @@ Watch the serial monitor (115200) for `SHT read failed (N consecutive)` /
 `Recovering SHT: ...` / `Recovering SGP41: ...` to confirm it self-heals. If
 recovery messages appear constantly, the dropout is a physical wiring/connector
 fault (see `firmware.txt` Option A), not something firmware can fully mask.
+
+### COM13 diagnostic findings
+The diagnostic session separated two failure modes:
+
+- A true hard freeze produced no serial output at all while the display was stuck.
+  That confirms a full firmware stall, not just failed cloud reporting.
+- Later captures did not freeze, but boot logs repeatedly showed `Init SGP41
+  failure` followed by `SHTx sensor not found`. The firmware then treated those
+  sensors as absent, so temp/humidity and TVOC/NOx disappeared from the web/API
+  output.
+
+The hardware still has SHT3x and SGP41. The firmware now keeps
+`configuration.hasSensorSHT` and `configuration.hasSensorSGP` true for this board
+so the local web/API layer does not treat those sensor types as nonexistent.
+Separate internal flags, `shtReady` and `sgpReady`, track whether each driver is
+currently initialized and safe to call.
+
+Current recovery behavior:
+
+- Boot prints `[DIAG] BUILD ...` and an I2C scan. Expected addresses are OLED
+  `0x3C`, SHT `0x44`, SGP41 `0x59`, and optional BME680 `0x76`/`0x77`.
+- If SGP41 or SHT init fails at boot, the sketch clears the I2C bus, waits
+  briefly, scans again, and retries once before continuing.
+- If either driver is still unavailable, the main loop retries missing I2C
+  sensors once per minute instead of abandoning them until reboot.
+- Failed SHT and SGP41 init paths free allocated objects before retrying, so a
+  retry loop does not slowly consume heap.
+- The dashboard/local page may still show blank readings while a driver is not
+  ready, but the firmware no longer marks the hardware itself as missing.
+
+If the scan never shows `0x44` and `0x59`, firmware cannot recover those readings
+because the sensors are not answering on the bus. Inspect the I2C side physically:
+sensor seating, solder joints, SDA/SCL continuity, 3.3 V power, ground, and
+pullups.
 
 ## Optional add-on: BME680 barometric pressure
 The DIY Pro V4.2 PCB has no BME680 spot, so this is a hand-wired extra on the

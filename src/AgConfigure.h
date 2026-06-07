@@ -141,7 +141,7 @@ public:
   void setCellOperatorState(const String &operators, uint32_t operatorId);
 
 private:
-  ConfigurationUpdatedCallback_t _callback;
+  ConfigurationUpdatedCallback_t _callback = nullptr;
 };
 
 #endif /** _AG_CONFIG_H_ */
